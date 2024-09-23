@@ -1,0 +1,302 @@
+#Por David Ruiz (@viajatech) 
+
+#pip install yfinance pandas numpy matplotlib transformers torch scikit-learn requests beautifulsoup4
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from transformers import pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+import requests
+from bs4 import BeautifulSoup
+import datetime
+import threading
+
+# Función para obtener noticias (simplificada para este ejemplo)
+def get_financial_news(ticker, num_articles):
+    search_query = f"{ticker} stock news"
+    url = f"https://www.google.com/search?q={search_query}&tbm=nws"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        headlines = []
+        for item in soup.find_all('div', attrs={'class': 'BVG0Nb'}):
+            headline = item.get_text()
+            if headline:
+                headlines.append(headline)
+            if len(headlines) >= num_articles:
+                break
+        if not headlines:
+            headlines = [f"No se encontraron noticias para {ticker}."]
+        return headlines
+    except Exception as e:
+        return [f"Error al obtener noticias: {e}"]
+
+# Clase principal de la aplicación
+class StockMarketAIApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("📈 StockMarketAI by Viaja Tech")
+        self.root.geometry("1200x800")
+
+        # Crear pestañas
+        self.tab_control = ttk.Notebook(self.root)
+        
+        self.tab_data = ttk.Frame(self.tab_control)
+        self.tab_sentiment = ttk.Frame(self.tab_control)
+        self.tab_prediction = ttk.Frame(self.tab_control)
+        
+        self.tab_control.add(self.tab_data, text='Datos Históricos')
+        self.tab_control.add(self.tab_sentiment, text='Análisis de Sentimiento')
+        self.tab_control.add(self.tab_prediction, text='Predicciones')
+        self.tab_control.pack(expand=1, fill="both")
+
+        # Configuración de entrada
+        self.create_input_frame()
+
+        # Inicializar variables
+        self.data = None
+        self.sentiment_df = None
+        self.model = None
+        self.model_sent = None
+        self.fig_price = None
+        self.fig_pred = None
+        self.fig_pred_sent = None
+
+    def create_input_frame(self):
+        input_frame = ttk.Frame(self.root)
+        input_frame.pack(pady=10)
+
+        # Símbolo de la acción
+        ttk.Label(input_frame, text="Símbolo de la Acción:").grid(row=0, column=0, padx=5, pady=5, sticky='E')
+        self.ticker_entry = ttk.Entry(input_frame, width=20)
+        self.ticker_entry.grid(row=0, column=1, padx=5, pady=5)
+        self.ticker_entry.insert(0, "AAPL")
+
+        # Fecha de inicio
+        ttk.Label(input_frame, text="Fecha de Inicio (YYYY-MM-DD):").grid(row=1, column=0, padx=5, pady=5, sticky='E')
+        self.start_date_entry = ttk.Entry(input_frame, width=20)
+        self.start_date_entry.grid(row=1, column=1, padx=5, pady=5)
+        self.start_date_entry.insert(0, "2020-01-01")
+
+        # Fecha de fin
+        ttk.Label(input_frame, text="Fecha de Fin (YYYY-MM-DD):").grid(row=2, column=0, padx=5, pady=5, sticky='E')
+        self.end_date_entry = ttk.Entry(input_frame, width=20)
+        self.end_date_entry.grid(row=2, column=1, padx=5, pady=5)
+        self.end_date_entry.insert(0, datetime.date.today().strftime("%Y-%m-%d"))
+
+        # Número de noticias
+        ttk.Label(input_frame, text="Número de Noticias:").grid(row=3, column=0, padx=5, pady=5, sticky='E')
+        self.num_news_slider = ttk.Scale(input_frame, from_=5, to=50, orient='horizontal')
+        self.num_news_slider.set(10)
+        self.num_news_slider.grid(row=3, column=1, padx=5, pady=5, sticky='W')
+
+        # Botón para ejecutar el análisis
+        self.run_button = ttk.Button(input_frame, text="Ejecutar Análisis", command=self.run_analysis)
+        self.run_button.grid(row=4, column=0, columnspan=2, pady=10)
+
+        # Barra de progreso
+        self.progress = ttk.Progressbar(input_frame, orient='horizontal', mode='indeterminate', length=200)
+        self.progress.grid(row=5, column=0, columnspan=2, pady=10)
+        self.progress.grid_remove()
+
+    def run_analysis(self):
+        # Desactivar el botón mientras se ejecuta el análisis
+        self.run_button.config(state='disabled')
+        self.progress.grid()
+        self.progress.start()
+        threading.Thread(target=self.perform_analysis).start()
+
+    def perform_analysis(self):
+        ticker = self.ticker_entry.get().upper()
+        start_date = self.start_date_entry.get()
+        end_date = self.end_date_entry.get()
+        num_news = int(self.num_news_slider.get())
+
+        try:
+            # 1. Obtención de Datos de la Acción
+            self.data = yf.download(ticker, start=start_date, end=end_date)
+            if self.data.empty:
+                raise ValueError("No se encontraron datos para el símbolo proporcionado.")
+            self.data.reset_index(inplace=True)
+
+            # Obtener el precio actual (último precio de cierre)
+            current_price = self.data['Close'].iloc[-1] if not self.data.empty else 'N/A'
+
+            # Actualizar Datos Históricos en la Pestaña correspondiente
+            self.update_data_tab(current_price)
+
+            # 2. Análisis de Sentimiento de Noticias Financieras
+            noticias = get_financial_news(ticker, num_news)
+            sentiment_pipeline = pipeline("sentiment-analysis")
+            sentimientos = sentiment_pipeline(noticias)
+            self.sentiment_df = pd.DataFrame(sentimientos)
+            self.sentiment_df['headline'] = noticias
+
+            # Actualizar Análisis de Sentimiento en la Pestaña correspondiente
+            self.update_sentiment_tab()
+
+            # 3. Preparación de Datos para Predicción
+            self.data['Day'] = self.data['Date'].dt.day
+            self.data['Month'] = self.data['Date'].dt.month
+            self.data['Year'] = self.data['Date'].dt.year
+            features = ['Day', 'Month', 'Year']
+            X = self.data[features]
+            y = self.data['Close']
+
+            # División de datos
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+            # Entrenamiento del Modelo
+            self.model = LinearRegression()
+            self.model.fit(X_train, y_train)
+
+            # Predicciones
+            y_pred = self.model.predict(X_test)
+            mse = mean_squared_error(y_test, y_pred)
+
+            # 4. Integración de Sentimiento en la Predicción
+            avg_sentiment = self.sentiment_df['score'].mean()
+            # Añadir sentimiento como característica
+            self.data['Sentiment'] = avg_sentiment
+            features_sent = ['Day', 'Month', 'Year', 'Sentiment']
+            X_sent = self.data[features_sent]
+            X_train_sent, X_test_sent, y_train_sent, y_test_sent = train_test_split(X_sent, y, test_size=0.2, shuffle=False)
+
+            # Entrenar un nuevo modelo con sentimiento
+            self.model_sent = LinearRegression()
+            self.model_sent.fit(X_train_sent, y_train_sent)
+
+            # Nuevas predicciones
+            y_pred_sent = self.model_sent.predict(X_test_sent)
+            mse_sent = mean_squared_error(y_test_sent, y_pred_sent)
+
+            # Obtener el precio probable futuro (última predicción)
+            probable_future_price = y_pred_sent[-1] if len(y_pred_sent) > 0 else 'N/A'
+
+            # Actualizar Predicciones en la Pestaña correspondiente
+            self.update_prediction_tab(y_test_sent, y_pred_sent, mse_sent, avg_sentiment, probable_future_price)
+
+            # Mostrar mensaje de éxito con información adicional
+            messagebox.showinfo("Éxito", f"Análisis completado con éxito.\nPrecio Actual de {ticker}: {current_price}\nPrecio Probable Futuro: {probable_future_price:.2f}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Ocurrió un error durante el análisis: {e}")
+
+        finally:
+            # Reactivar el botón y detener la barra de progreso
+            self.run_button.config(state='normal')
+            self.progress.stop()
+            self.progress.grid_remove()
+
+    def update_data_tab(self, current_price):
+        # Limpiar pestaña
+        for widget in self.tab_data.winfo_children():
+            widget.destroy()
+
+        ttk.Label(self.tab_data, text="Datos Históricos de la Acción", font=("Helvetica", 16)).pack(pady=10)
+        
+        # Mostrar precio actual
+        ttk.Label(self.tab_data, text=f"📊 Precio Actual: {current_price}", font=("Helvetica", 14)).pack(pady=5)
+
+        # Mostrar tabla de datos
+        data_table = ttk.Treeview(self.tab_data)
+        data_table['columns'] = list(self.data.columns)
+        data_table['show'] = 'headings'
+        for col in self.data.columns:
+            data_table.heading(col, text=col)
+            data_table.column(col, anchor='center', width=100)
+        for index, row in self.data.iterrows():
+            data_table.insert("", "end", values=list(row))
+            if index >= 10:  # Limitar a las últimas 10 filas para evitar sobrecarga
+                break
+        data_table.pack(pady=10)
+
+        # Gráfico de Precio de Cierre
+        fig = plt.Figure(figsize=(8, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot(self.data['Date'], self.data['Close'], label='Precio de Cierre')
+        ax.set_title('Precio de Cierre de la Acción')
+        ax.set_xlabel('Fecha')
+        ax.set_ylabel('Precio ($)')
+        ax.legend()
+
+        canvas = FigureCanvasTkAgg(fig, master=self.tab_data)
+        canvas.draw()
+        canvas.get_tk_widget().pack()
+
+    def update_sentiment_tab(self):
+        # Limpiar pestaña
+        for widget in self.tab_sentiment.winfo_children():
+            widget.destroy()
+
+        ttk.Label(self.tab_sentiment, text="Análisis de Sentimiento de Noticias Financieras", font=("Helvetica", 16)).pack(pady=10)
+
+        if self.sentiment_df is not None and not self.sentiment_df.empty:
+            # Mostrar tabla de sentimientos
+            sentiment_table = ttk.Treeview(self.tab_sentiment)
+            sentiment_table['columns'] = list(self.sentiment_df.columns)
+            sentiment_table['show'] = 'headings'
+            for col in self.sentiment_df.columns:
+                sentiment_table.heading(col, text=col)
+                sentiment_table.column(col, anchor='center', width=150)
+            for index, row in self.sentiment_df.iterrows():
+                sentiment_table.insert("", "end", values=list(row))
+                if index >= 10:  # Limitar a las primeras 10 noticias para evitar sobrecarga
+                    break
+            sentiment_table.pack(pady=10)
+
+            # Gráfico de Sentimientos
+            fig = plt.Figure(figsize=(8, 4), dpi=100)
+            ax = fig.add_subplot(111)
+            colors = ['green' if label == 'POSITIVE' else 'red' for label in self.sentiment_df['label']]
+            ax.bar(range(len(self.sentiment_df)), self.sentiment_df['score'], color=colors)
+            ax.set_title('Sentimiento de las Noticias')
+            ax.set_xlabel('Titulares')
+            ax.set_ylabel('Puntuación de Sentimiento')
+            ax.set_xticks(range(len(self.sentiment_df)))
+            ax.set_xticklabels([f"{i+1}" for i in range(len(self.sentiment_df))], rotation=45)
+            plt.tight_layout()
+
+            canvas = FigureCanvasTkAgg(fig, master=self.tab_sentiment)
+            canvas.draw()
+            canvas.get_tk_widget().pack()
+        else:
+            ttk.Label(self.tab_sentiment, text="No se pudieron obtener noticias para analizar.", font=("Helvetica", 12)).pack(pady=20)
+
+    def update_prediction_tab(self, y_test, y_pred, mse_sent, avg_sentiment, probable_future_price):
+        # Limpiar pestaña
+        for widget in self.tab_prediction.winfo_children():
+            widget.destroy()
+
+        ttk.Label(self.tab_prediction, text="Predicción de Tendencias Futuras", font=("Helvetica", 16)).pack(pady=10)
+        ttk.Label(self.tab_prediction, text=f"📉 Error Cuadrático Medio (MSE): {mse_sent:.2f}", font=("Helvetica", 12)).pack(pady=5)
+        ttk.Label(self.tab_prediction, text=f"📊 Sentimiento Promedio de las Noticias: {avg_sentiment:.2f}", font=("Helvetica", 12)).pack(pady=5)
+        ttk.Label(self.tab_prediction, text=f"🔮 Precio Probable Futuro: {probable_future_price:.2f}", font=("Helvetica", 14, "bold")).pack(pady=10)
+
+        # Gráfico de Predicción vs Realidad
+        fig = plt.Figure(figsize=(8, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot(range(len(y_test)), y_test, label='Realidad', color='blue')
+        ax.plot(range(len(y_pred)), y_pred, label='Predicción con Sentimiento', color='orange')
+        ax.set_title('Predicción vs Realidad del Precio de Cierre')
+        ax.set_xlabel('Periodo')
+        ax.set_ylabel('Precio ($)')
+        ax.legend()
+
+        canvas = FigureCanvasTkAgg(fig, master=self.tab_prediction)
+        canvas.draw()
+        canvas.get_tk_widget().pack()
+
+# Ejecutar la aplicación
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = StockMarketAIApp(root)
+    root.mainloop()
